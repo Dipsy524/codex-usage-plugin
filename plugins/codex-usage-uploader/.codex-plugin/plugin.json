@@ -1,0 +1,23 @@
+{
+  "name": "codex-usage-uploader",
+  "version": "0.1.0",
+  "description": "Upload local Codex usage summarized from CC Switch.",
+  "author": {
+    "name": "Dipsy524"
+  },
+  "repository": "https://github.com/Dipsy524/codex-usage-plugin",
+  "license": "MIT",
+  "keywords": ["codex", "usage", "cc-switch"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Usage Uploader",
+    "shortDescription": "Upload local Codex usage from CC Switch.",
+    "longDescription": "Reads the local CC Switch SQLite database and uploads per-machine Codex daily and monthly usage summaries to the configured private reports repository.",
+    "developerName": "Dipsy524",
+    "category": "Productivity",
+    "capabilities": ["Local files", "Git"],
+    "defaultPrompt": [
+      "Upload this machine's Codex usage"
+    ]
+  }
+}
