@@ -103,6 +103,7 @@ def query_summary(db_path, start_day, end_day):
     sql = f"""
     SELECT
       COUNT(*) AS requests,
+      COUNT(DISTINCT CASE WHEN l.session_id IS NOT NULL AND l.session_id <> '' THEN l.session_id END) AS session_count,
       COALESCE(SUM(l.input_tokens), 0) AS input_tokens_including_cache,
       COALESCE(SUM(CASE
         WHEN l.input_tokens >= l.cache_read_tokens THEN l.input_tokens - l.cache_read_tokens
@@ -149,11 +150,12 @@ def query_summary(db_path, start_day, end_day):
     finally:
         con.close()
 
-    requests, raw_input, fresh, output, cache_read, cache_create, cost = row
+    requests, session_count, raw_input, fresh, output, cache_read, cache_create, cost = row
     real_total = fresh + output + cache_read + cache_create
     cacheable = fresh + cache_read + cache_create
     return {
         "requests": int(requests),
+        "session_count": int(session_count),
         "input_tokens_including_cache": int(raw_input),
         "fresh_input_tokens": int(fresh),
         "output_tokens": int(output),
@@ -265,6 +267,7 @@ def self_test():
               cache_creation_tokens INTEGER,
               total_cost_usd TEXT,
               status_code INTEGER,
+              session_id TEXT,
               created_at INTEGER,
               data_source TEXT
             )
@@ -272,16 +275,17 @@ def self_test():
         )
         base = local_epoch(dt.date.today())
         rows = [
-            ("session-1", "codex", "gpt-5", 1000, 50, 600, 0, "0.100000", 200, base + 1, "codex_session"),
-            ("proxy-1", "codex", "gpt-5", 200, 10, 0, 0, "0.200000", 200, base + 2, "proxy"),
-            ("session-dup", "codex", "gpt-5", 200, 10, 0, 0, "0.200000", 200, base + 3, "codex_session"),
+            ("session-1", "codex", "gpt-5", 1000, 50, 600, 0, "0.100000", 200, "s1", base + 1, "codex_session"),
+            ("proxy-1", "codex", "gpt-5", 200, 10, 0, 0, "0.200000", 200, "s2", base + 2, "proxy"),
+            ("session-dup", "codex", "gpt-5", 200, 10, 0, 0, "0.200000", 200, "s3", base + 3, "codex_session"),
         ]
-        con.executemany("INSERT INTO proxy_request_logs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        con.executemany("INSERT INTO proxy_request_logs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
         con.commit()
         con.close()
 
         summary = query_summary(db, dt.date.today(), dt.date.today() + dt.timedelta(days=1))
         assert summary["requests"] == 2, summary
+        assert summary["session_count"] == 2, summary
         assert summary["fresh_input_tokens"] == 600, summary
         assert summary["output_tokens"] == 60, summary
         assert summary["cache_read_tokens"] == 600, summary
