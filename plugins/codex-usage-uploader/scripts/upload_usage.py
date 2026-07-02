@@ -6,17 +6,15 @@ import os
 import re
 import shutil
 import socket
-import sqlite3
 import subprocess
 import sys
 import tempfile
-import urllib.parse
 from pathlib import Path
 
 
 DEFAULT_REPORTS_REPO = "git@github.com:Dipsy524/codex-usage-reports.git"
 DEFAULT_BRANCH = "main"
-DEDUP_WINDOW_SECONDS = 10 * 60
+NEAR_LIMIT_PERCENT = 95
 
 
 def fail(message):
@@ -46,37 +44,12 @@ def default_machine_id():
     )
 
 
-def candidate_db_paths(explicit=None):
-    raw = []
-    if explicit:
-        raw.append(explicit)
-    if os.environ.get("CC_SWITCH_DB"):
-        raw.append(os.environ["CC_SWITCH_DB"])
-    raw.append(str(Path.home() / ".cc-switch" / "cc-switch.db"))
-    for key in ("USERPROFILE", "HOME"):
-        if os.environ.get(key):
-            raw.append(str(Path(os.environ[key]) / ".cc-switch" / "cc-switch.db"))
-
-    seen = set()
-    for item in raw:
-        path = Path(item).expanduser()
-        key = str(path).lower()
-        if key not in seen:
-            seen.add(key)
-            yield path
-
-
-def find_cc_switch_db(explicit=None):
-    candidates = list(candidate_db_paths(explicit))
-    for path in candidates:
-        if path.is_file():
-            return path
-    fail("cc-switch.db not found. Checked: " + ", ".join(str(p) for p in candidates))
-
-
-def sqlite_ro_uri(path):
-    normalized = str(path.resolve()).replace("\\", "/")
-    return "file:" + urllib.parse.quote(normalized, safe="/:") + "?mode=ro"
+def parse_month(value):
+    try:
+        year, month = value.split("-", 1)
+        return dt.date(int(year), int(month), 1)
+    except (ValueError, TypeError):
+        fail(f"invalid --month {value!r}; expected YYYY-MM")
 
 
 def parse_day(value):
@@ -88,10 +61,7 @@ def parse_day(value):
 
 def month_bounds(day):
     start = dt.date(day.year, day.month, 1)
-    if day.month == 12:
-        end = dt.date(day.year + 1, 1, 1)
-    else:
-        end = dt.date(day.year, day.month + 1, 1)
+    end = dt.date(day.year + (day.month == 12), 1 if day.month == 12 else day.month + 1, 1)
     return start, end
 
 
@@ -99,88 +69,175 @@ def local_epoch(day):
     return int(dt.datetime(day.year, day.month, day.day).timestamp())
 
 
-def query_summary(db_path, start_day, end_day):
-    sql = f"""
-    SELECT
-      COUNT(*) AS requests,
-      COUNT(DISTINCT CASE WHEN l.session_id IS NOT NULL AND l.session_id <> '' THEN l.session_id END) AS session_count,
-      COALESCE(SUM(l.input_tokens), 0) AS input_tokens_including_cache,
-      COALESCE(SUM(CASE
-        WHEN l.input_tokens >= l.cache_read_tokens THEN l.input_tokens - l.cache_read_tokens
-        ELSE l.input_tokens
-      END), 0) AS fresh_input_tokens,
-      COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
-      COALESCE(SUM(l.cache_read_tokens), 0) AS cache_read_tokens,
-      COALESCE(SUM(l.cache_creation_tokens), 0) AS cache_creation_tokens,
-      COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) AS cost_usd
-    FROM proxy_request_logs l
-    WHERE l.app_type = 'codex'
-      AND l.created_at >= ?
-      AND l.created_at < ?
-      AND NOT (
-        COALESCE(l.data_source, 'proxy') IN ('session_log', 'codex_session', 'gemini_session', 'opencode_session')
-        AND EXISTS (
-          SELECT 1
-          FROM proxy_request_logs proxy_dedup
-          WHERE COALESCE(proxy_dedup.data_source, 'proxy') = 'proxy'
-            AND proxy_dedup.app_type = l.app_type
-            AND proxy_dedup.status_code >= 200
-            AND proxy_dedup.status_code < 300
-            AND proxy_dedup.input_tokens = l.input_tokens
-            AND proxy_dedup.output_tokens = l.output_tokens
-            AND proxy_dedup.cache_read_tokens = l.cache_read_tokens
-            AND (
-              proxy_dedup.cache_creation_tokens = l.cache_creation_tokens
-              OR (l.cache_creation_tokens = 0 AND COALESCE(l.data_source, 'proxy') IN ('codex_session', 'gemini_session', 'opencode_session'))
-            )
-            AND proxy_dedup.created_at BETWEEN l.created_at - {DEDUP_WINDOW_SECONDS} AND l.created_at + {DEDUP_WINDOW_SECONDS}
-            AND (
-              LOWER(proxy_dedup.model) = LOWER(l.model)
-              OR LOWER(proxy_dedup.model) = 'unknown'
-              OR LOWER(l.model) = 'unknown'
-            )
-        )
-      )
-    """
-    con = sqlite3.connect(sqlite_ro_uri(db_path), uri=True, timeout=5)
+def parse_timestamp(value):
+    if not value:
+        return None
     try:
-        row = con.execute(sql, (local_epoch(start_day), local_epoch(end_day))).fetchone()
-    except sqlite3.OperationalError as exc:
-        fail(f"cannot read CC Switch usage table: {exc}")
-    finally:
-        con.close()
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return None
 
-    requests, session_count, raw_input, fresh, output, cache_read, cache_create, cost = row
-    real_total = fresh + output + cache_read + cache_create
-    cacheable = fresh + cache_read + cache_create
+
+def codex_roots(explicit=None):
+    if explicit:
+        yield Path(explicit).expanduser()
+        return
+
+    roots = []
+    if os.environ.get("CODEX_HOME"):
+        roots.append(Path(os.environ["CODEX_HOME"]))
+    roots.append(Path.home() / ".codex")
+    for key in ("USERPROFILE", "HOME"):
+        if os.environ.get(key):
+            roots.append(Path(os.environ[key]) / ".codex")
+
+    seen = set()
+    for root in roots:
+        root = root.expanduser()
+        key = str(root).lower()
+        if key not in seen:
+            seen.add(key)
+            yield root
+
+
+def iter_session_jsonl(root):
+    for base in (root / "sessions", root / "archived_sessions"):
+        if base.is_dir():
+            yield from base.rglob("*.jsonl")
+
+
+def empty_week(key, seen_at, month_start, month_end):
+    monday = seen_at.date() - dt.timedelta(days=seen_at.weekday())
     return {
-        "requests": int(requests),
-        "session_count": int(session_count),
-        "input_tokens_including_cache": int(raw_input),
-        "fresh_input_tokens": int(fresh),
-        "output_tokens": int(output),
-        "cache_read_tokens": int(cache_read),
-        "cache_creation_tokens": int(cache_create),
-        "real_total_tokens": int(real_total),
-        "cache_hit_rate": round((cache_read / cacheable) if cacheable else 0, 6),
-        "cost_usd": round(float(cost), 6),
+        "week": key,
+        "start": max(monday, month_start).isoformat(),
+        "end": min(monday + dt.timedelta(days=7), month_end).isoformat(),
+        "snapshot_count": 0,
+        "five_hour_max_percent": 0.0,
+        "five_hour_latest_percent": None,
+        "seven_day_max_percent": 0.0,
+        "seven_day_latest_percent": None,
+        "near_limit": False,
+        "latest_seen_at": None,
+        "_latest_seen_epoch": None,
+        "_five_hour_latest_epoch": None,
+        "_seven_day_latest_epoch": None,
     }
 
 
-def report_payload(period_type, start_day, end_day, machine_id, db_path):
-    totals = query_summary(db_path, start_day, end_day)
+def update_latest(target, epoch_key, value_key, seen_epoch, used):
+    if target[epoch_key] is None or seen_epoch > target[epoch_key]:
+        target[epoch_key] = seen_epoch
+        target[value_key] = used
+
+
+def query_monthly_quota(month_start, month_end, codex_home=None):
+    start_ts = local_epoch(month_start)
+    end_ts = local_epoch(month_end)
+    summary = {
+        "snapshot_count": 0,
+        "five_hour_max_percent": 0.0,
+        "five_hour_latest_percent": None,
+        "seven_day_max_percent": 0.0,
+        "seven_day_latest_percent": None,
+        "near_limit_week_count": 0,
+        "threshold_percent": NEAR_LIMIT_PERCENT,
+        "latest_seen_at": None,
+        "weeks": [],
+        "_latest_seen_epoch": None,
+        "_five_hour_latest_epoch": None,
+        "_seven_day_latest_epoch": None,
+    }
+    weeks = {}
+
+    for root in codex_roots(codex_home):
+        for path in iter_session_jsonl(root):
+            try:
+                lines = path.open("r", encoding="utf-8")
+            except OSError:
+                continue
+            with lines:
+                for line in lines:
+                    if "rate_limits" not in line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    seen_at = parse_timestamp(obj.get("timestamp"))
+                    if not seen_at:
+                        continue
+                    seen_epoch = int(seen_at.timestamp())
+                    if seen_epoch < start_ts or seen_epoch >= end_ts:
+                        continue
+                    rate_limits = (obj.get("payload") or {}).get("rate_limits") or {}
+                    if not isinstance(rate_limits, dict):
+                        continue
+
+                    year, week, _ = seen_at.isocalendar()
+                    key = f"{year}-W{week:02d}"
+                    bucket = weeks.setdefault(key, empty_week(key, seen_at, month_start, month_end))
+                    bucket["snapshot_count"] += 1
+                    summary["snapshot_count"] += 1
+
+                    if bucket["_latest_seen_epoch"] is None or seen_epoch > bucket["_latest_seen_epoch"]:
+                        bucket["_latest_seen_epoch"] = seen_epoch
+                        bucket["latest_seen_at"] = seen_at.isoformat(timespec="seconds")
+                    if summary["_latest_seen_epoch"] is None or seen_epoch > summary["_latest_seen_epoch"]:
+                        summary["_latest_seen_epoch"] = seen_epoch
+                        summary["latest_seen_at"] = seen_at.isoformat(timespec="seconds")
+
+                    for name, minutes, prefix in (("primary", 300, "five_hour"), ("secondary", 10080, "seven_day")):
+                        window = rate_limits.get(name) or {}
+                        if not isinstance(window, dict) or window.get("window_minutes") != minutes:
+                            continue
+                        try:
+                            used = float(window["used_percent"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        max_key = f"{prefix}_max_percent"
+                        latest_key = f"{prefix}_latest_percent"
+                        epoch_key = f"_{prefix}_latest_epoch"
+                        bucket[max_key] = max(bucket[max_key], used)
+                        summary[max_key] = max(summary[max_key], used)
+                        update_latest(bucket, epoch_key, latest_key, seen_epoch, used)
+                        update_latest(summary, epoch_key, latest_key, seen_epoch, used)
+
+    for week in sorted(weeks.values(), key=lambda item: item["start"]):
+        week["five_hour_max_percent"] = round(week["five_hour_max_percent"], 2)
+        week["seven_day_max_percent"] = round(week["seven_day_max_percent"], 2)
+        week["near_limit"] = week["seven_day_max_percent"] >= NEAR_LIMIT_PERCENT
+        if week["near_limit"]:
+            summary["near_limit_week_count"] += 1
+        for key in list(week):
+            if key.startswith("_"):
+                del week[key]
+        summary["weeks"].append(week)
+
+    summary["five_hour_max_percent"] = round(summary["five_hour_max_percent"], 2)
+    summary["seven_day_max_percent"] = round(summary["seven_day_max_percent"], 2)
+    for key in list(summary):
+        if key.startswith("_"):
+            del summary[key]
+    return summary
+
+
+def report_payload(month_start, month_end, machine_id, codex_home=None):
+    quota = query_monthly_quota(month_start, month_end, codex_home)
+    if quota["snapshot_count"] == 0:
+        fail(f"no Codex rate limit snapshots found for {month_start:%Y-%m}")
     return {
-        "schema_version": 1,
-        "source": "cc-switch.db",
+        "schema_version": 2,
+        "source": "codex-jsonl",
         "app_type": "codex",
         "machine_id": machine_id,
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "period": {
-            "type": period_type,
-            "start": start_day.isoformat(),
-            "end": end_day.isoformat(),
+            "type": "monthly",
+            "start": month_start.isoformat(),
+            "end": month_end.isoformat(),
         },
-        "totals": totals,
+        "quota": quota,
     }
 
 
@@ -220,90 +277,96 @@ def write_json(path, payload):
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def selected_month(args):
+    if args.month and args.date:
+        fail("use either --month or --date, not both")
+    if args.month:
+        return month_bounds(parse_month(args.month))
+    if args.date:
+        return month_bounds(parse_day(args.date))
+    return month_bounds(dt.date.today())
+
+
 def upload(args):
-    db_path = find_cc_switch_db(args.db)
     machine_id = sanitize(args.machine_id or default_machine_id())
-    day = parse_day(args.date) if args.date else dt.date.today()
-    month_start, month_end = month_bounds(day)
-    daily = report_payload("daily", day, day + dt.timedelta(days=1), machine_id, db_path)
-    monthly = report_payload("monthly", month_start, month_end, machine_id, db_path)
+    month_start, month_end = selected_month(args)
+    monthly = report_payload(month_start, month_end, machine_id, args.codex_home)
 
     repo = args.repo or os.environ.get("CODEX_USAGE_REPORTS_REPO") or DEFAULT_REPORTS_REPO
     branch = args.branch or os.environ.get("CODEX_USAGE_REPORTS_BRANCH") or DEFAULT_BRANCH
     workdir = Path(args.workdir).expanduser() if args.workdir else default_workdir()
 
     if args.dry_run:
-        print(json.dumps({"daily": daily, "monthly": monthly}, ensure_ascii=False, indent=2))
+        print(json.dumps(monthly, ensure_ascii=False, indent=2))
         return
 
     repo_dir = ensure_reports_repo(repo, branch, workdir)
-    write_json(repo_dir / "usage" / "daily" / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}" / f"{machine_id}.json", daily)
     write_json(repo_dir / "usage" / "monthly" / f"{month_start.year:04d}" / f"{month_start.month:02d}" / f"{machine_id}.json", monthly)
 
     run(["git", "add", "usage"], cwd=repo_dir)
     status = run(["git", "status", "--porcelain"], cwd=repo_dir).stdout.strip()
     if not status:
-        print("No usage changes to upload.")
+        print("No quota changes to upload.")
         return
 
-    run(["git", "commit", "-m", f"Update Codex usage for {machine_id} {day.isoformat()}"], cwd=repo_dir)
+    run(["git", "commit", "-m", f"Update Codex quota for {machine_id} {month_start:%Y-%m}"], cwd=repo_dir)
     run(["git", "push", "-u", "origin", branch], cwd=repo_dir)
-    print(f"Uploaded Codex usage for {machine_id} to {repo}.")
+    print(f"Uploaded Codex quota for {machine_id} {month_start:%Y-%m} to {repo}.")
 
 
 def self_test():
     with tempfile.TemporaryDirectory() as td:
-        db = Path(td) / "cc-switch.db"
-        con = sqlite3.connect(db)
-        con.execute(
-            """
-            CREATE TABLE proxy_request_logs (
-              request_id TEXT PRIMARY KEY,
-              app_type TEXT,
-              model TEXT,
-              input_tokens INTEGER,
-              output_tokens INTEGER,
-              cache_read_tokens INTEGER,
-              cache_creation_tokens INTEGER,
-              total_cost_usd TEXT,
-              status_code INTEGER,
-              session_id TEXT,
-              created_at INTEGER,
-              data_source TEXT
-            )
-            """
-        )
-        base = local_epoch(dt.date.today())
+        root = Path(td) / ".codex"
+        sessions = root / "sessions" / "2026" / "06" / "02"
+        sessions.mkdir(parents=True)
+        log = sessions / "rollout.jsonl"
         rows = [
-            ("session-1", "codex", "gpt-5", 1000, 50, 600, 0, "0.100000", 200, "s1", base + 1, "codex_session"),
-            ("proxy-1", "codex", "gpt-5", 200, 10, 0, 0, "0.200000", 200, "s2", base + 2, "proxy"),
-            ("session-dup", "codex", "gpt-5", 200, 10, 0, 0, "0.200000", 200, "s3", base + 3, "codex_session"),
+            ("2026-06-02T01:00:00Z", 20, 94),
+            ("2026-06-03T01:00:00Z", 55, 96),
+            ("2026-06-10T01:00:00Z", 10, 30),
+            ("2026-07-01T01:00:00Z", 99, 99),
         ]
-        con.executemany("INSERT INTO proxy_request_logs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
-        con.commit()
-        con.close()
+        log.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "timestamp": timestamp,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "rate_limits": {
+                                "primary": {"used_percent": five_hour, "window_minutes": 300},
+                                "secondary": {"used_percent": seven_day, "window_minutes": 10080},
+                            },
+                        },
+                    }
+                )
+                for timestamp, five_hour, seven_day in rows
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
-        summary = query_summary(db, dt.date.today(), dt.date.today() + dt.timedelta(days=1))
-        assert summary["requests"] == 2, summary
-        assert summary["session_count"] == 2, summary
-        assert summary["fresh_input_tokens"] == 600, summary
-        assert summary["output_tokens"] == 60, summary
-        assert summary["cache_read_tokens"] == 600, summary
-        assert summary["real_total_tokens"] == 1260, summary
-        assert summary["cost_usd"] == 0.3, summary
+        quota = query_monthly_quota(dt.date(2026, 6, 1), dt.date(2026, 7, 1), root)
+        assert quota["snapshot_count"] == 3, quota
+        assert quota["five_hour_max_percent"] == 55, quota
+        assert quota["seven_day_max_percent"] == 96, quota
+        assert quota["near_limit_week_count"] == 1, quota
+        assert len(quota["weeks"]) == 2, quota
     print("self-test passed")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Upload local Codex usage from CC Switch to GitHub reports.")
-    parser.add_argument("--date", help="local day to upload, YYYY-MM-DD; default today")
+    parser = argparse.ArgumentParser(description="Upload local Codex monthly quota usage from Codex JSONL logs.")
+    parser.add_argument("--month", help="month to upload, YYYY-MM; default current month")
+    parser.add_argument("--date", help="choose the month containing this local day, YYYY-MM-DD")
     parser.add_argument("--machine-id", help="stable machine label; default hostname")
-    parser.add_argument("--db", help="explicit path to cc-switch.db")
+    parser.add_argument("--codex-home", help="explicit Codex home directory; default CODEX_HOME or ~/.codex")
     parser.add_argument("--repo", help="reports repo remote")
     parser.add_argument("--branch", help="reports repo branch")
     parser.add_argument("--workdir", help="local clone/cache directory for the reports repo")
     parser.add_argument("--dry-run", action="store_true", help="print JSON without cloning or pushing")
-    parser.add_argument("--self-test", action="store_true", help="run a tiny SQLite aggregation test")
+    parser.add_argument("--self-test", action="store_true", help="run a tiny JSONL aggregation test")
     args = parser.parse_args()
 
     if args.self_test:
