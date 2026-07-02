@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import datetime as dt
+import io
 import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -35,13 +36,11 @@ def sanitize(value):
     return value.strip("-._") or "unknown-machine"
 
 
-def default_machine_id():
-    return sanitize(
-        os.environ.get("CODEX_USAGE_MACHINE_ID")
-        or os.environ.get("COMPUTERNAME")
-        or os.environ.get("HOSTNAME")
-        or socket.gethostname()
-    )
+def resolve_machine_id(explicit=None, env=None):
+    value = explicit or (env or os.environ).get("CODEX_USAGE_MACHINE_ID")
+    if not value:
+        fail("请提供您的机器名称")
+    return sanitize(value)
 
 
 def parse_month(value):
@@ -288,7 +287,7 @@ def selected_month(args):
 
 
 def upload(args):
-    machine_id = sanitize(args.machine_id or default_machine_id())
+    machine_id = resolve_machine_id(args.machine_id)
     month_start, month_end = selected_month(args)
     monthly = report_payload(month_start, month_end, machine_id, args.codex_home)
 
@@ -316,6 +315,14 @@ def upload(args):
 
 def self_test():
     with tempfile.TemporaryDirectory() as td:
+        assert resolve_machine_id(" office pc 01 ", env={}) == "office-pc-01"
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                resolve_machine_id(None, env={})
+            raise AssertionError("missing machine id did not fail")
+        except SystemExit:
+            pass
+
         root = Path(td) / ".codex"
         sessions = root / "sessions" / "2026" / "06" / "02"
         sessions.mkdir(parents=True)
@@ -360,7 +367,7 @@ def main():
     parser = argparse.ArgumentParser(description="Upload local Codex monthly quota usage from Codex JSONL logs.")
     parser.add_argument("--month", help="month to upload, YYYY-MM; default current month")
     parser.add_argument("--date", help="choose the month containing this local day, YYYY-MM-DD")
-    parser.add_argument("--machine-id", help="stable machine/account label; default hostname")
+    parser.add_argument("--machine-id", help="stable machine/account label; default CODEX_USAGE_MACHINE_ID")
     parser.add_argument("--codex-home", help="explicit Codex home directory; default CODEX_HOME or ~/.codex")
     parser.add_argument("--repo", help="reports repo remote")
     parser.add_argument("--branch", help="reports repo branch")

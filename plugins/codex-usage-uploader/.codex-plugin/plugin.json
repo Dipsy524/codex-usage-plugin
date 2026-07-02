@@ -1,6 +1,6 @@
 {
   "name": "codex-usage-uploader",
-  "version": "0.1.0+codex.20260702062002",
+  "version": "0.1.0+codex.20260702070048",
   "description": "Upload local monthly Codex quota usage and set up reports repo SSH access.",
   "author": {
     "name": "Dipsy524"
