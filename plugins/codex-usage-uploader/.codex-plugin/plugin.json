@@ -1,7 +1,7 @@
 {
   "name": "codex-usage-uploader",
-  "version": "0.1.0+codex.20260702052650",
-  "description": "Upload local monthly Codex quota usage from Codex JSONL logs.",
+  "version": "0.1.0+codex.20260702062002",
+  "description": "Upload local monthly Codex quota usage and set up reports repo SSH access.",
   "author": {
     "name": "Dipsy524"
   },
@@ -10,13 +10,15 @@
   "keywords": [
     "codex",
     "usage",
-    "quota"
+    "quota",
+    "ssh",
+    "deploy-key"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Usage Uploader",
-    "shortDescription": "Upload local Codex quota usage.",
-    "longDescription": "Reads local Codex JSONL session logs and uploads per-machine monthly quota usage grouped by week to the configured private reports repository.",
+    "shortDescription": "Upload Codex quota usage and setup access.",
+    "longDescription": "Reads local Codex JSONL session logs, uploads per-machine monthly quota usage grouped by week, and helps generate SSH deploy keys for the private reports repository.",
     "developerName": "Dipsy524",
     "category": "Productivity",
     "capabilities": [
@@ -24,7 +26,8 @@
       "Git"
     ],
     "defaultPrompt": [
-      "Upload this machine's monthly Codex quota usage"
+      "Upload this machine's monthly Codex quota usage",
+      "Generate an SSH public key for Codex usage reports upload"
     ]
   }
 }
