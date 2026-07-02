@@ -16,6 +16,7 @@ Behavior:
 - Reads Codex JSONL session logs under `CODEX_HOME`, `~/.codex/sessions`, and `~/.codex/archived_sessions`.
 - Reads only `rate_limits` snapshots; do not upload prompts, responses, token totals, or cost.
 - Uploads this machine's monthly quota summary grouped by natural weeks to `git@github.com:Dipsy524/codex-usage-reports.git`.
+- For account-based quota reporting, use `--machine-id` or `CODEX_USAGE_MACHINE_ID` as the employee/account label.
 - Uses the local `git` credential or SSH deploy key. If `git push` fails, report that the machine lacks write access to the private reports repo.
 
 Useful options:
@@ -30,7 +31,7 @@ python scripts/upload_usage.py --self-test
 
 Environment overrides:
 
-- `CODEX_USAGE_MACHINE_ID`: stable machine label for report filenames.
+- `CODEX_USAGE_MACHINE_ID`: stable machine/account label for report filenames.
 - `CODEX_USAGE_REPORTS_REPO`: reports repo remote, default `git@github.com:Dipsy524/codex-usage-reports.git`.
 - `CODEX_USAGE_REPORTS_BRANCH`: reports repo branch, default `main`.
 - `CODEX_USAGE_WORKDIR`: local clone/cache path for the reports repo.

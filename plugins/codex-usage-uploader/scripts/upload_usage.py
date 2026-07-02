@@ -360,7 +360,7 @@ def main():
     parser = argparse.ArgumentParser(description="Upload local Codex monthly quota usage from Codex JSONL logs.")
     parser.add_argument("--month", help="month to upload, YYYY-MM; default current month")
     parser.add_argument("--date", help="choose the month containing this local day, YYYY-MM-DD")
-    parser.add_argument("--machine-id", help="stable machine label; default hostname")
+    parser.add_argument("--machine-id", help="stable machine/account label; default hostname")
     parser.add_argument("--codex-home", help="explicit Codex home directory; default CODEX_HOME or ~/.codex")
     parser.add_argument("--repo", help="reports repo remote")
     parser.add_argument("--branch", help="reports repo branch")
