@@ -16,6 +16,10 @@ from pathlib import Path
 DEFAULT_REPORTS_REPO = "git@github.com:Dipsy524/codex-usage-reports.git"
 DEFAULT_BRANCH = "main"
 NEAR_LIMIT_PERCENT = 95
+WINDOW_PREFIXES = {
+    300: "five_hour",
+    10080: "seven_day",
+}
 
 
 def fail(message):
@@ -37,7 +41,8 @@ def sanitize(value):
 
 
 def resolve_machine_id(explicit=None, env=None):
-    value = explicit or (env or os.environ).get("CODEX_USAGE_MACHINE_ID")
+    source_env = os.environ if env is None else env
+    value = explicit or source_env.get("CODEX_USAGE_MACHINE_ID")
     if not value:
         fail("请提供您的机器名称")
     return sanitize(value)
@@ -112,9 +117,9 @@ def empty_week(key, seen_at, month_start, month_end):
         "start": max(monday, month_start).isoformat(),
         "end": min(monday + dt.timedelta(days=7), month_end).isoformat(),
         "snapshot_count": 0,
-        "five_hour_max_percent": 0.0,
+        "five_hour_max_percent": None,
         "five_hour_latest_percent": None,
-        "seven_day_max_percent": 0.0,
+        "seven_day_max_percent": None,
         "seven_day_latest_percent": None,
         "near_limit": False,
         "latest_seen_at": None,
@@ -130,14 +135,19 @@ def update_latest(target, epoch_key, value_key, seen_epoch, used):
         target[value_key] = used
 
 
+def update_max(target, value_key, used):
+    if target[value_key] is None or used > target[value_key]:
+        target[value_key] = used
+
+
 def query_monthly_quota(month_start, month_end, codex_home=None):
     start_ts = local_epoch(month_start)
     end_ts = local_epoch(month_end)
     summary = {
         "snapshot_count": 0,
-        "five_hour_max_percent": 0.0,
+        "five_hour_max_percent": None,
         "five_hour_latest_percent": None,
-        "seven_day_max_percent": 0.0,
+        "seven_day_max_percent": None,
         "seven_day_latest_percent": None,
         "near_limit_week_count": 0,
         "threshold_percent": NEAR_LIMIT_PERCENT,
@@ -186,9 +196,12 @@ def query_monthly_quota(month_start, month_end, codex_home=None):
                         summary["_latest_seen_epoch"] = seen_epoch
                         summary["latest_seen_at"] = seen_at.isoformat(timespec="seconds")
 
-                    for name, minutes, prefix in (("primary", 300, "five_hour"), ("secondary", 10080, "seven_day")):
+                    for name in ("primary", "secondary"):
                         window = rate_limits.get(name) or {}
-                        if not isinstance(window, dict) or window.get("window_minutes") != minutes:
+                        if not isinstance(window, dict):
+                            continue
+                        prefix = WINDOW_PREFIXES.get(window.get("window_minutes"))
+                        if not prefix:
                             continue
                         try:
                             used = float(window["used_percent"])
@@ -197,15 +210,19 @@ def query_monthly_quota(month_start, month_end, codex_home=None):
                         max_key = f"{prefix}_max_percent"
                         latest_key = f"{prefix}_latest_percent"
                         epoch_key = f"_{prefix}_latest_epoch"
-                        bucket[max_key] = max(bucket[max_key], used)
-                        summary[max_key] = max(summary[max_key], used)
+                        update_max(bucket, max_key, used)
+                        update_max(summary, max_key, used)
                         update_latest(bucket, epoch_key, latest_key, seen_epoch, used)
                         update_latest(summary, epoch_key, latest_key, seen_epoch, used)
 
     for week in sorted(weeks.values(), key=lambda item: item["start"]):
-        week["five_hour_max_percent"] = round(week["five_hour_max_percent"], 2)
-        week["seven_day_max_percent"] = round(week["seven_day_max_percent"], 2)
-        week["near_limit"] = week["seven_day_max_percent"] >= NEAR_LIMIT_PERCENT
+        for key in ("five_hour_max_percent", "seven_day_max_percent"):
+            if week[key] is not None:
+                week[key] = round(week[key], 2)
+        week["near_limit"] = (
+            week["seven_day_max_percent"] is not None
+            and week["seven_day_max_percent"] >= NEAR_LIMIT_PERCENT
+        )
         if week["near_limit"]:
             summary["near_limit_week_count"] += 1
         for key in list(week):
@@ -213,8 +230,9 @@ def query_monthly_quota(month_start, month_end, codex_home=None):
                 del week[key]
         summary["weeks"].append(week)
 
-    summary["five_hour_max_percent"] = round(summary["five_hour_max_percent"], 2)
-    summary["seven_day_max_percent"] = round(summary["seven_day_max_percent"], 2)
+    for key in ("five_hour_max_percent", "seven_day_max_percent"):
+        if summary[key] is not None:
+            summary[key] = round(summary[key], 2)
     for key in list(summary):
         if key.startswith("_"):
             del summary[key]
@@ -226,7 +244,7 @@ def report_payload(month_start, month_end, machine_id, codex_home=None):
     if quota["snapshot_count"] == 0:
         fail(f"no Codex rate limit snapshots found for {month_start:%Y-%m}")
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "source": "codex-jsonl",
         "app_type": "codex",
         "machine_id": machine_id,
@@ -328,10 +346,48 @@ def self_test():
         sessions.mkdir(parents=True)
         log = sessions / "rollout.jsonl"
         rows = [
-            ("2026-06-02T01:00:00Z", 20, 94),
-            ("2026-06-03T01:00:00Z", 55, 96),
-            ("2026-06-10T01:00:00Z", 10, 30),
-            ("2026-07-01T01:00:00Z", 99, 99),
+            (
+                "2026-06-02T01:00:00Z",
+                {
+                    "primary": {"used_percent": 20, "window_minutes": 300},
+                    "secondary": {"used_percent": 94, "window_minutes": 10080},
+                },
+            ),
+            (
+                "2026-06-03T01:00:00Z",
+                {
+                    "primary": {"used_percent": 55, "window_minutes": 300},
+                    "secondary": {"used_percent": 96, "window_minutes": 10080},
+                },
+            ),
+            (
+                "2026-06-10T01:00:00Z",
+                {
+                    "primary": {"used_percent": 30, "window_minutes": 10080},
+                    "secondary": None,
+                },
+            ),
+            (
+                "2026-06-11T01:00:00Z",
+                {
+                    "primary": {"used_percent": 40, "window_minutes": 10080},
+                    "secondary": None,
+                },
+            ),
+            (
+                "2026-06-12T01:00:00Z",
+                {
+                    "primary": {"used_percent": 0, "window_minutes": 10080},
+                    "secondary": None,
+                },
+            ),
+            (
+                "2026-07-01T01:00:00Z",
+                {
+                    "primary": {"used_percent": 99, "window_minutes": 300},
+                    "secondary": {"used_percent": 99, "window_minutes": 10080},
+                },
+            ),
         ]
         log.write_text(
             "\n".join(
@@ -341,25 +397,26 @@ def self_test():
                         "type": "event_msg",
                         "payload": {
                             "type": "token_count",
-                            "rate_limits": {
-                                "primary": {"used_percent": five_hour, "window_minutes": 300},
-                                "secondary": {"used_percent": seven_day, "window_minutes": 10080},
-                            },
+                            "rate_limits": rate_limits,
                         },
                     }
                 )
-                for timestamp, five_hour, seven_day in rows
+                for timestamp, rate_limits in rows
             )
             + "\n",
             encoding="utf-8",
         )
 
         quota = query_monthly_quota(dt.date(2026, 6, 1), dt.date(2026, 7, 1), root)
-        assert quota["snapshot_count"] == 3, quota
+        assert quota["snapshot_count"] == 5, quota
         assert quota["five_hour_max_percent"] == 55, quota
         assert quota["seven_day_max_percent"] == 96, quota
         assert quota["near_limit_week_count"] == 1, quota
         assert len(quota["weeks"]) == 2, quota
+        assert quota["weeks"][1]["five_hour_max_percent"] is None, quota
+        assert quota["weeks"][1]["five_hour_latest_percent"] is None, quota
+        assert quota["weeks"][1]["seven_day_max_percent"] == 40, quota
+        assert quota["weeks"][1]["seven_day_latest_percent"] == 0, quota
     print("self-test passed")
 
 
