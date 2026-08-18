@@ -15,7 +15,7 @@ from pathlib import Path
 
 DEFAULT_REPORTS_REPO = "git@github.com:Dipsy524/codex-usage-reports.git"
 DEFAULT_BRANCH = "main"
-NEAR_LIMIT_PERCENT = 95
+NEAR_LIMIT_PERCENT = 90
 WINDOW_PREFIXES = {
     300: "five_hour",
     10080: "seven_day",
@@ -350,14 +350,14 @@ def self_test():
                 "2026-06-02T01:00:00Z",
                 {
                     "primary": {"used_percent": 20, "window_minutes": 300},
-                    "secondary": {"used_percent": 94, "window_minutes": 10080},
+                    "secondary": {"used_percent": 89, "window_minutes": 10080},
                 },
             ),
             (
                 "2026-06-03T01:00:00Z",
                 {
                     "primary": {"used_percent": 55, "window_minutes": 300},
-                    "secondary": {"used_percent": 96, "window_minutes": 10080},
+                    "secondary": {"used_percent": 90, "window_minutes": 10080},
                 },
             ),
             (
@@ -410,7 +410,7 @@ def self_test():
         quota = query_monthly_quota(dt.date(2026, 6, 1), dt.date(2026, 7, 1), root)
         assert quota["snapshot_count"] == 5, quota
         assert quota["five_hour_max_percent"] == 55, quota
-        assert quota["seven_day_max_percent"] == 96, quota
+        assert quota["seven_day_max_percent"] == 90, quota
         assert quota["near_limit_week_count"] == 1, quota
         assert len(quota["weeks"]) == 2, quota
         assert quota["weeks"][1]["five_hour_max_percent"] is None, quota
