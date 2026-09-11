@@ -1,6 +1,6 @@
 # Codex Usage Uploader
 
-Codex plugin for uploading local Codex usage summarized from CC Switch.
+Codex plugin for uploading the maximum observed seven-day Codex quota usage from local Codex JSONL session logs, grouped by natural week.
 
 Install this marketplace:
 
@@ -8,7 +8,7 @@ Install this marketplace:
 codex plugin marketplace add Dipsy524/codex-usage-plugin
 ```
 
-The upload skill reads `~/.cc-switch/cc-switch.db` and pushes JSON summaries to:
+The upload skill reads local Codex `rate_limits` snapshots and pushes JSON summaries to:
 
 ```text
 git@github.com:Dipsy524/codex-usage-reports.git

@@ -1,7 +1,7 @@
 {
   "name": "codex-usage-uploader",
-  "version": "0.1.0+codex.20260818063229",
-  "description": "Upload local monthly Codex quota usage and set up reports repo SSH access.",
+  "version": "0.1.0+codex.20260911082026",
+  "description": "Upload monthly Codex seven-day quota peaks and set up reports repo SSH access.",
   "author": {
     "name": "Dipsy524"
   },
@@ -17,8 +17,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Usage Uploader",
-    "shortDescription": "Upload Codex quota usage and setup access.",
-    "longDescription": "Reads local Codex JSONL session logs, uploads per-machine monthly quota usage grouped by week, and helps generate SSH deploy keys for the private reports repository.",
+    "shortDescription": "Upload seven-day Codex quota peaks and setup access.",
+    "longDescription": "Reads local Codex JSONL session logs, uploads per-machine monthly seven-day quota peaks grouped by natural week, and helps generate SSH deploy keys for the private reports repository.",
     "developerName": "Dipsy524",
     "category": "Productivity",
     "capabilities": [
